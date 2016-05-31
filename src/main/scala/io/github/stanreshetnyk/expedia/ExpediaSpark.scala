@@ -1,9 +1,6 @@
 import org.apache.log4j.{ Level, Logger }
-import org.apache.spark.ml.classification.RandomForestClassifier
-import org.apache.spark.ml.feature.VectorAssembler
 import org.apache.spark.mllib.linalg.{ Vectors, Vector }
 import org.apache.spark.rdd.RDD
-import org.apache.spark.sql.catalyst.expressions.UnaryExpression
 import org.apache.spark.sql.expressions.{ WindowSpec, Window }
 import org.apache.spark.sql.hive.HiveContext
 import org.apache.spark.sql.types._
@@ -17,10 +14,13 @@ import org.apache.spark.sql.functions._
 import org.apache.spark.mllib.feature.PCA
 
 /**
- * From https://www.kaggle.com/c/expedia-hotel-recommendations/forums/t/20488/beating-the-benchmark-in-scala-on-a-spark-cluster
+ * From http://nbviewer.jupyter.org/gist/vykhand/1f2484ff14fbbf805234160cf90668b4#as-mentioned-earlier,-you-can-monitor-jobs-on-spark_machine:4040-by-default
+ *
  * Porting from Python to Scala DataFrame with a little of RDD
  */
 object ExpediaSpark extends App {
+
+  val IS_TEST_RUN = true
 
   val csvFormat = "com.databricks.spark.csv"
 
@@ -29,7 +29,7 @@ object ExpediaSpark extends App {
   val TRAIN_FILE = STORAGE + "train.csv"
   val DESTINATIONS_FILE = STORAGE + "destinations.csv"
   val TRAIN_SMALL_FILE = STORAGE + "train-small.csv"
-  val TEST_SMALL_FILE = STORAGE + "train-test.csv"
+  val TEST_SMALL_FILE = STORAGE + "test-small.csv"
   val TEST_FILE = STORAGE + "test.csv"
 
   // Columns
@@ -49,7 +49,6 @@ object ExpediaSpark extends App {
   val CNT = "cnt"
   val RN_ALL = "rn_all"
 
-
   Logger.getLogger("org").setLevel(Level.WARN)
 
   val sc = new SparkContext(
@@ -65,47 +64,38 @@ object ExpediaSpark extends App {
   implicit def str2Column(x: String) = col(x)
 
   def start() {
-    //  val formatter = DateTimeFormat.forPattern("yyyy-mm-dd'T'kk:mm:ss")
 
-    // create smaller data to work with
-    if (!File(TRAIN_SMALL_FILE).exists) {
-      val partData = sc.textFile(TRAIN_FILE).take(10000)
-      saveToFile(TRAIN_SMALL_FILE, partData)
-      println("Created small train file")
-    } else {
-      println("Using existing small train file")
+    val (trainFile, testFile) = IS_TEST_RUN match {
+
+      case true =>
+        // create smaller data to work with
+        if (!File(TRAIN_SMALL_FILE).exists) {
+          val partData = sc.textFile(TRAIN_FILE).take(100000)
+          saveToFile(TRAIN_SMALL_FILE, partData)
+          println("Created small train file")
+        } else {
+          println("Using existing small train file")
+        }
+
+        // create smaller data to work with
+        if (!File(TEST_SMALL_FILE).exists) {
+          val partData = sc.textFile(TEST_FILE).take(100000)
+          saveToFile(TEST_SMALL_FILE, partData)
+          println("Created small test file")
+        } else {
+          println("Using existing small test file")
+        }
+        (TRAIN_SMALL_FILE, TEST_SMALL_FILE)
+
+      case false =>
+        (TRAIN_FILE, TEST_FILE)
     }
 
-    // create smaller data to work with
-    if (!File(TEST_SMALL_FILE).exists) {
-      val partData = sc.textFile(TEST_FILE).take(10000)
-      saveToFile(TEST_SMALL_FILE, partData)
-      println("Created small test file")
-    } else {
-      println("Using existing small test file")
-    }
-
-    val train = loadData(TRAIN_SMALL_FILE)
+    val train = loadData(trainFile)
 
     train.show(5)
 
     println("Size of train set: " + train.count())
-    //    println("Size of test set: " + test.count())
-    //
-    //    println("Top 5 popular hotel clusters:")
-    //    val top5hotelDF = all.groupBy(HOTEL_CLUSTER).count().sort(col("count").desc)
-    //    top5hotelDF.show(5)
-    //
-    //    val top5hotelList = top5hotelDF.select(HOTEL_CLUSTER).take(5).map(_.getInt(0))
-    //    println("Hotels: " + top5hotelList.mkString(","))
-    //
-    //    val predictions = test
-    //      .select(USER_ID)
-    //      .withColumn("result", struct(top5hotelList.map(lit(_)): _*))
-    //
-    //    val actual = test.select(USER_ID, HOTEL_CLUSTER)
-    //
-    //    validate(predictions, actual)
 
     // Leakage solution
 
@@ -167,16 +157,16 @@ object ExpediaSpark extends App {
 
     //    top5_hotels = (agg_popular_hotel_cluster.limit(5).rdd.keys().collect())
     //    top5_bc = sc.broadcast(top5_hotels)
-    val top5_hotels = agg_popular_hotel_cluster.rdd.take(5) // TODO
+    val top5_hotels: List[Int] = agg_popular_hotel_cluster.rdd.take(5).map(_.getInt(0)).toList
     val top5_bc = sc.broadcast(top5_hotels)
+    println("Top 5 hotel clusters: " + top5_hotels.mkString(" "))
 
     // ---------------------- //
     train.unpersist()
 
-    val test = loadData(TEST_SMALL_FILE, false)
+    val test = loadData(testFile, false)
       .withColumn(ORIG_DESTINATION_DISTANCE, col(ORIG_DESTINATION_DISTANCE) multiply 100000)
       .cache()
-
 
     test.show(5)
 
@@ -203,7 +193,6 @@ object ExpediaSpark extends App {
 
     // ---------------------- //
 
-
     val w4 = Window.partitionBy(ID).orderBy(RN)
     val test_union = selectWithRowNumber(test_join_1
       .unionAll(test_join_2)
@@ -211,30 +200,35 @@ object ExpediaSpark extends App {
       .unionAll(test_remainder), w4, RN_ALL, false)
       .orderBy(ID, RN_ALL)
 
-
+    test_union.show(5)
 
     val submission = test_union
-    .orderBy(ID, RN_ALL)
-    .rdd
+      .orderBy(ID, RN_ALL)
+      .rdd
       .map(x => {
-        println(x)
-        println(x.getClass)
-        x
+        (x.getInt(0), List(x.getInt(1)))
       })
-//      .map(x => (x.id, [x.hotel_cluster,]))
-//    .reduceByKey(add)
-//      .mapValues(lambda x: (x + top5_bc.value)[:5])
-//    .mapValues(lambda x: " ".join([str(i) for i in x]))
-//    .map(lambda x: Row(id = x[0], hotel_cluster = x[1]))
-//    .toDF()
-//    ).toPandas()
-//
-//    # generating submission file
-//    submission.set_index('id', inplace=True)
-//    submission.sort_index(inplace=True)
+      //      .map(x => (x.id, [x.hotel_cluster,]))
+      .reduceByKey((a, b) => a ++ b)
+      .mapValues(x => (x ++ top5_bc.value).take(5))
+      .mapValues(x => x.take(5).mkString(" "))
+      .map(x => Row(x._1, x._2))
+    //      .mapValues(lambda x: (x + top5_bc.value)[:5])
+    //    .mapValues(lambda x: " ".join([str(i) for i in x]))
+    //    .map(lambda x: Row(id = x[0], hotel_cluster = x[1]))
+
+    val submissionSchema = new StructType(Array(
+      StructField(ID, IntegerType),
+      StructField(HOTEL_CLUSTER, StringType)))
+
+    val submissionDF = sqlContext
+      .createDataFrame(submission, submissionSchema)
+      .orderBy(ID)
+      .repartition(1)
+    submissionDF.show(5)
+
+    saveToDF(RESULT_FILE, submissionDF)
   }
-
-
 
   def selectWithRowNumber(df: DataFrame, ws: WindowSpec, alias: String = RN, cache: Boolean = true): DataFrame = {
     val res1 = df.select((df.columns.map(col) :+ rowNumber.over(ws).alias(alias)): _*)
@@ -248,6 +242,14 @@ object ExpediaSpark extends App {
 
   def saveToFile(fileName: String, rows: Array[_]): Unit = {
     scala.tools.nsc.io.File(fileName).writeAll(rows.mkString("\n"))
+  }
+
+  def saveToDF(fileName: String, df: DataFrame) = {
+    df.write
+      .format(csvFormat)
+      .option("header", "true")
+      .mode(SaveMode.Overwrite)
+      .save(fileName)
   }
 
   def saveToFile(fileName: String, df: DataFrame): Unit = {
