@@ -1,19 +1,19 @@
 import org.apache.log4j.{ Level, Logger }
-import org.apache.spark.mllib.linalg.{Vectors, Vector}
+import org.apache.spark.mllib.linalg.{ Vectors, Vector }
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.types._
-import org.apache.spark.sql.{SaveMode, Row, DataFrame, SQLContext}
+import org.apache.spark.sql._
 import org.apache.spark.{ SparkConf, SparkContext }
 
 import scala.tools.nsc.io.File
 
 import org.apache.spark.sql.functions._
 
-import org.apache.spark.mllib.regression.LabeledPoint
 import org.apache.spark.mllib.feature.PCA
 
 /**
  * From https://www.kaggle.com/c/expedia-hotel-recommendations/forums/t/20488/beating-the-benchmark-in-scala-on-a-spark-cluster
+ * Porting from Python to Scala DataFrame with a little of RDD
  */
 object ExpediaSpark extends App {
 
@@ -55,7 +55,7 @@ object ExpediaSpark extends App {
       println("Using existing small train file")
     }
 
-    val (all, train, test) = loadData(TRAIN_SMALL_FILE, sqlContext)
+    val (all, train, test) = loadData(TRAIN_SMALL_FILE)
 
     train.show(5)
 
@@ -78,6 +78,8 @@ object ExpediaSpark extends App {
     val actual = test.select(USER_ID, HOTEL_CLUSTER)
 
     validate(predictions, actual)
+
+    val destinations = loadDestinations(DESTINATIONS_FILE)
   }
 
   def saveToFile(fileName: String, rows: Array[_]): Unit = {
@@ -88,9 +90,7 @@ object ExpediaSpark extends App {
     df.write.mode(SaveMode.Overwrite).parquet(fileName)
   }
 
-  def loadData(
-    trainFile: String,
-    sqlContext: SQLContext): (DataFrame, DataFrame, DataFrame) = {
+  def loadData(trainFile: String): (DataFrame, DataFrame, DataFrame) = {
     val nullable = true
 
     val schemaArray = Array(
@@ -121,22 +121,16 @@ object ExpediaSpark extends App {
 
     val trainSchema = StructType(schemaArray)
 
-    val initialFrame =
-      sqlContext.read
-        .format(csvFormat)
-        .option("header", "true")
-        .schema(trainSchema)
-        .load(trainFile)
+    val df = loadDataFrame(trainFile, Some(trainSchema))
 
-        .withColumn("year", year(col("date_time")))
-        .withColumn("month", month(col("date_time")))
+      // add year and month as separate columns
+      .withColumn("year", year(col("date_time")))
+      .withColumn("month", month(col("date_time")))
 
-    // we don't need not booked activity
-    val df = initialFrame
-      .filter(initialFrame("is_booking") eqNullSafe 1)
+      // we don't need not booked activity
+      .filter(col("is_booking") eqNullSafe 1)
 
     df.printSchema()
-    //df.describe("year", "month").show(10)
 
     val trainDF = df.filter(df("year") lt 2014)
     val testDF = df.filter(df("year") eqNullSafe 2014)
@@ -144,26 +138,49 @@ object ExpediaSpark extends App {
     (df, trainDF, testDF)
   }
 
-  def loadDestinations(): Unit = {
-    val dest = sqlContext.read
-      .format(csvFormat)
-      .option("header", "true")
-      .option("inferSchema", "true")
-      .load(DESTINATIONS_FILE)
+  /**
+    * Load destinations data, and apply PCA to reduce features from 149 to 3
+    */
+  def loadDestinations(fileName: String): DataFrame = {
+    val dest = loadDataFrame(fileName)
 
     val pca = new PCA(3).fit(
-      dest.rdd.map {
-        r =>
-          val v = r.toSeq.tail.toArray.map {
-            case d: Double => d
-            case _ => 0.0
-          }
-          Vectors.dense(v)
-      }
-    )
+      dest.rdd.map(destRowToArray))
 
-//    val projected = dest.map(p => p.copy(features = pca.transform(p.features)))
-//    projected
+    val projectedRDD: RDD[Row] = dest.map(
+      p => {
+        val newData = pca.transform(destRowToArray(p)) // transform only d* columns
+        Row.fromSeq(p.get(0) +: newData.toArray) // prepend id back to result
+      })
+
+    val schemaOfDest = StructType(Array(
+      StructField("srch_destination_id", IntegerType, false),
+      StructField("pca_d1", DoubleType, false),
+      StructField("pca_d2", DoubleType, false),
+      StructField("pca_d3", DoubleType, false)))
+
+    val projected = sqlContext.createDataFrame(projectedRDD, schemaOfDest)
+
+    println("Size of projected " + projectedRDD.first().size + " " + projectedRDD.count())
+    projected
+  }
+
+  def destRowToArray(r: Row): Vector = {
+    val v = r.toSeq.tail.toArray.map {
+      case d: Double => d
+      case _ => 0.0
+    }
+    Vectors.dense(v)
+  }
+
+  private def loadDataFrame(trainFile: String, trainSchema: Option[StructType] = None): DataFrame = {
+    val d = sqlContext.read
+      .format(csvFormat)
+      .option("header", "true")
+    (trainSchema match {
+      case Some(schema) => d.schema(schema)
+      case None => d.option("inferSchema", "true")
+    }).load(trainFile)
   }
 
   /**
