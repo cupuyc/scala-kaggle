@@ -1,3 +1,5 @@
+package io.github.stanreshetnyk
+
 import org.apache.log4j.{ Level, Logger }
 import org.apache.spark.mllib.linalg.{ Vectors, Vector }
 import org.apache.spark.rdd.RDD
@@ -7,20 +9,22 @@ import org.apache.spark.sql.types._
 import org.apache.spark.sql._
 import org.apache.spark.{ SparkConf, SparkContext }
 
+import scala.io.Source
 import scala.tools.nsc.io.File
 
 import org.apache.spark.sql.functions._
 
-import org.apache.spark.mllib.feature.PCA
+import org.apache.spark.storage.StorageLevel
 
 /**
  * From http://nbviewer.jupyter.org/gist/vykhand/1f2484ff14fbbf805234160cf90668b4#as-mentioned-earlier,-you-can-monitor-jobs-on-spark_machine:4040-by-default
  *
  * Porting from Python to Scala DataFrame with a little of RDD
+ * Score of submission is 0.49155
  */
 object ExpediaSpark extends App {
 
-  val IS_TEST_RUN = true
+  val IS_TEST_RUN = false
 
   val csvFormat = "com.databricks.spark.csv"
 
@@ -54,8 +58,12 @@ object ExpediaSpark extends App {
   val sc = new SparkContext(
     new SparkConf()
       .setAppName("Expedia")
-      .set("spark.app.id", "spark")
-      .setMaster("local[*]"))
+//      .set("spark.app.id", "spark.expedia")
+      .set("spark.executor.memory", "12g")
+      .set("spark.driver.memory", "4g")
+      .setMaster("spark://MacBook-Pro-Stan.local:7077")
+      //.setMaster("local[*]")
+   )
 
   val sqlContext = new HiveContext(sc)
 
@@ -93,9 +101,9 @@ object ExpediaSpark extends App {
 
     val train = loadData(trainFile)
 
-    train.show(5)
+    // train.show(5)
 
-    println("Size of train set: " + train.count())
+//    println("Size of train set: " + train.count())
 
     // Leakage solution
 
@@ -122,7 +130,7 @@ object ExpediaSpark extends App {
 
     val w2 = Window.partitionBy(cols1: _*).orderBy(col(SUM_WB).desc)
     val agg_best_search_dest_ctry = selectWithRowNumber(train
-      .filter(year(col(DATE_TIME)) eqNullSafe 2014)
+      .filter(year(col(DATE_TIME)) equalTo 2014)
       .select((cols2 :+ formula1.alias(WB)): _*)
       .groupBy(cols2: _*)
       .sum(WB)
@@ -150,13 +158,11 @@ object ExpediaSpark extends App {
       .sum(WB)
       .withColumnRenamed("sum(wb)", SUM_WB)
       .orderBy(col(SUM_WB).desc)
-      .cache()
+      .persist(StorageLevel.MEMORY_AND_DISK)
 
     // ---------------------- //
     // broadcasting top5 hotels
 
-    //    top5_hotels = (agg_popular_hotel_cluster.limit(5).rdd.keys().collect())
-    //    top5_bc = sc.broadcast(top5_hotels)
     val top5_hotels: List[Int] = agg_popular_hotel_cluster.rdd.take(5).map(_.getInt(0)).toList
     val top5_bc = sc.broadcast(top5_hotels)
     println("Top 5 hotel clusters: " + top5_hotels.mkString(" "))
@@ -166,9 +172,9 @@ object ExpediaSpark extends App {
 
     val test = loadData(testFile, false)
       .withColumn(ORIG_DESTINATION_DISTANCE, col(ORIG_DESTINATION_DISTANCE) multiply 100000)
-      .cache()
+      .persist(StorageLevel.MEMORY_AND_DISK)
 
-    test.show(5)
+    // test.show(5)
 
     val test_join_1 = test.join(agg_ulc_odd_hc, Seq(USER_LOCATION_CITY, ORIG_DESTINATION_DISTANCE))
       .select(ID, HOTEL_CLUSTER, RN)
@@ -200,7 +206,7 @@ object ExpediaSpark extends App {
       .unionAll(test_remainder), w4, RN_ALL, false)
       .orderBy(ID, RN_ALL)
 
-    test_union.show(5)
+    // test_union.show(5)
 
     val submission = test_union
       .orderBy(ID, RN_ALL)
@@ -225,18 +231,18 @@ object ExpediaSpark extends App {
       .createDataFrame(submission, submissionSchema)
       .orderBy(ID)
       .repartition(1)
-    submissionDF.show(5)
+    // submissionDF.show(5)
 
     saveToDF(RESULT_FILE, submissionDF)
   }
 
   def selectWithRowNumber(df: DataFrame, ws: WindowSpec, alias: String = RN, cache: Boolean = true): DataFrame = {
-    val res1 = df.select((df.columns.map(col) :+ rowNumber.over(ws).alias(alias)): _*)
+    val res1 = df.select((df.columns.map(col) :+ row_number.over(ws).alias(alias)): _*)
       .filter(col(alias) leq 5)
 
-    val res = if (cache) res1.cache() else res1
+    val res = if (cache) res1.persist(StorageLevel.MEMORY_AND_DISK) else res1
 
-    res.show(5)
+    // res.show(5)
     res
   }
 
@@ -258,21 +264,28 @@ object ExpediaSpark extends App {
 
   def loadData(trainFile: String, isTraining: Boolean = true): DataFrame = {
     val nullable = true
+    val NOT_NULL = false
+
+    Source.fromFile(trainFile).getLines.flatMap(line => {
+      val arr = line.split(",")
+      val index: Int = (if (isTraining) 0 else 1)
+      if (arr(index) == null) Some("Problem with date: " + line) else None
+    }).foreach(println)
 
     val schemaArray = Array(
-      StructField(DATE_TIME, TimestampType),
+      StructField(DATE_TIME, TimestampType, NOT_NULL),
       StructField("site_name", IntegerType, nullable),
       StructField("posa_continent", IntegerType, nullable),
       StructField("user_location_country", IntegerType, nullable),
       StructField("user_location_region", IntegerType, nullable),
       StructField(USER_LOCATION_CITY, IntegerType, nullable),
       StructField(ORIG_DESTINATION_DISTANCE, FloatType, nullable),
-      StructField(USER_ID, IntegerType),
+      StructField(USER_ID, IntegerType, NOT_NULL),
       StructField("is_mobile", IntegerType, nullable),
       StructField("is_package", IntegerType, nullable),
       StructField("channel", IntegerType, nullable),
-      StructField(SRCH_CI, DateType, nullable),
-      StructField(SRCH_CO, DateType, nullable),
+      StructField(SRCH_CI, StringType, nullable),
+      StructField(SRCH_CO, StringType, nullable),
       StructField("srch_adults_cnt", IntegerType, nullable),
       StructField("srch_children_cnt", IntegerType, nullable),
       StructField("srch_rm_cnt", IntegerType, nullable),
@@ -285,105 +298,16 @@ object ExpediaSpark extends App {
       StructField(HOTEL_MARKET, IntegerType, nullable))
 
     val schemaArrayExtra = isTraining match {
-      case true => schemaArray :+ StructField(HOTEL_CLUSTER, IntegerType)
-      case false => StructField(ID, IntegerType) +: schemaArray
+      case true => schemaArray :+ StructField(HOTEL_CLUSTER, IntegerType, NOT_NULL)
+      case false => StructField(ID, IntegerType, NOT_NULL) +: schemaArray
     }
 
     val origDF = loadDataFrame(trainFile, Some(StructType(schemaArrayExtra)))
 
     origDF.printSchema()
+//    origDF.select(avg(col(DATE_TIME))).show(5)
 
     origDF
-  }
-
-  def addExtraFeatures(origDF: DataFrame) = {
-    val df1 =
-      // add year, month, ... to date_time column
-      addDTFeatures(origDF)
-        // add year and month as separate columns
-        .withColumn("year", year(col("date_time")))
-        .withColumn("month", month(col("date_time")))
-        .withColumn("ci_year", year(col("srch_ci")))
-
-    val destinations = loadDestinations(DESTINATIONS_FILE)
-
-    val df = addCiCoFeatures(df1, List(SRCH_CI, SRCH_CO))
-      .join(destinations, SRCH_DESTINATION_ID)
-      .drop(col(SRCH_DESTINATION_ID))
-      .na.fill(-1)
-
-    val trainDF = df.filter(df("year") lt 2014)
-    val testDF = df.filter(df("year") eqNullSafe 2014)
-
-    (trainDF, testDF)
-  }
-
-  def addFeatues(origDF: DataFrame, columnNames: List[String], features: List[(String, Column)]): DataFrame = {
-    columnNames
-      .foldLeft(origDF)((d, cn) => {
-        features
-          .foldLeft(d)((ddd, tuple) => ddd.withColumn(cn + "_" + tuple._1, tuple._2))
-      })
-  }
-
-  def addDTFeatures(df: DataFrame): DataFrame = {
-    val cn = DATE_TIME
-    val column = col(cn)
-    addFeatues(df, List(cn), List(
-      ("y", year(column)),
-      ("m", month(column)),
-      ("d", dayofyear(column)),
-      ("h", hour(column)),
-      ("minute", minute(column)),
-      ("q", quarter(column)),
-      ("week", weekofyear(column))))
-    // NOTE: day of week is skipped
-  }
-
-  def addCiCoFeatures(df: DataFrame, columnNames: List[String]): DataFrame = {
-    columnNames
-      .foldLeft(df)((df, cn) => {
-        addFeatues(df, List(cn), List(
-          ("d", dayofyear(col(cn))),
-          ("m", month(col(cn))),
-          ("q", quarter(col(cn)))))
-        // NOTE: day of week is skipped
-      })
-  }
-
-  /**
-   * Load destinations data, and apply PCA to reduce features from 149 to 3
-   */
-  def loadDestinations(fileName: String): DataFrame = {
-    val dest = loadDataFrame(fileName)
-
-    val pca = new PCA(3).fit(
-      dest.rdd.map(destRowToArray))
-
-    val projectedRDD: RDD[Row] = dest.map(
-      p => {
-        val newData = pca.transform(destRowToArray(p)) // transform only d* columns
-        Row.fromSeq(p.get(0) +: newData.toArray) // prepend id back to result
-      })
-
-    val schemaOfDest = StructType(Array(
-      StructField(SRCH_DESTINATION_ID, IntegerType, false),
-      StructField("pca_d1", DoubleType, false),
-      StructField("pca_d2", DoubleType, false),
-      StructField("pca_d3", DoubleType, false)))
-
-    val projected = sqlContext.createDataFrame(projectedRDD, schemaOfDest)
-
-    println("Size of projected " + projectedRDD.first().size + " " + projectedRDD.count())
-    projected
-  }
-
-  def destRowToArray(r: Row): Vector = {
-    val v = r.toSeq.tail.toArray.map {
-      case d: Double => d
-      case _ => 0.0
-    }
-    Vectors.dense(v)
   }
 
   private def loadDataFrame(trainFile: String, trainSchema: Option[StructType] = None): DataFrame = {
@@ -394,42 +318,5 @@ object ExpediaSpark extends App {
       case Some(schema) => d.schema(schema)
       case None => d.option("inferSchema", "true")
     }).load(trainFile)
-  }
-
-  /**
-   * Mean average precision at K.
-   * Copied from "Machine Learning with Spark" book
-   */
-  def avgPrecisionK(actual: Seq[Int], predicted: Seq[Int], k: Int): Double = {
-    val predK = predicted.take(k)
-    var score = 0.0
-    var numHits = 0.0
-    for ((p, i) <- predK.zipWithIndex) {
-      if (actual.contains(p)) {
-        numHits += 1.0
-        score += numHits / (i.toDouble + 1.0)
-
-      }
-    }
-    if (actual.isEmpty) {
-      1.0
-    } else {
-      score / scala.math.min(actual.size, k).toDouble
-    }
-  }
-
-  def validate(predictions: DataFrame, actual: DataFrame): Double = {
-    val K = 5
-    val MAPK = predictions.join(actual, USER_ID).map {
-
-      case Row(userId: Int, Row(predictedList @ _*), actual: Int) =>
-        //println(userId + " " + predictedList + " " + actual)
-        avgPrecisionK(Seq(actual), predictedList.asInstanceOf[Seq[Int]], K)
-
-    }
-      .reduce(_ + _) / predictions.count
-
-    println("Validation result " + MAPK)
-    MAPK
   }
 }
