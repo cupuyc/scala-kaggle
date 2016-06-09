@@ -1,3 +1,6 @@
 .idea
 target
 *.csv
+
+spark-logs/*
+metastore_db

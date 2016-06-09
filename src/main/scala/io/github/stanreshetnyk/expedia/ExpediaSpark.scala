@@ -1,8 +1,6 @@
 package io.github.stanreshetnyk
 
 import org.apache.log4j.{ Level, Logger }
-import org.apache.spark.mllib.linalg.{ Vectors, Vector }
-import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.expressions.{ WindowSpec, Window }
 import org.apache.spark.sql.hive.HiveContext
 import org.apache.spark.sql.types._
@@ -21,6 +19,12 @@ import org.apache.spark.storage.StorageLevel
  *
  * Porting from Python to Scala DataFrame with a little of RDD
  * Score of submission is 0.49155
+ *
+ * Leakage Solution description:
+ * You can find hotel_clusters for the affected rows by matching rows from the train dataset
+ * based on the following columns: user_location_country, user_location_region, user_location_city,
+ * hotel_market and orig_destination_distance. However, this will not be 100% accurate
+ * because hotels can change cluster assignments (hotels popularity and price have seasonal characteristics).
  */
 object ExpediaSpark extends App {
 
@@ -58,12 +62,14 @@ object ExpediaSpark extends App {
   val sc = new SparkContext(
     new SparkConf()
       .setAppName("Expedia")
-//      .set("spark.app.id", "spark.expedia")
+      //      .set("spark.app.id", "spark.expedia")
       .set("spark.executor.memory", "12g")
       .set("spark.driver.memory", "4g")
-      .setMaster("spark://MacBook-Pro-Stan.local:7077")
-      //.setMaster("local[*]")
-   )
+//      .set("spark.eventLog.enabled", "true")
+//      .set("spark.eventLog.dir", "spark-logs")
+      //.setMaster("spark://localhost:7077")
+      .setMaster("local[*]")
+      )
 
   val sqlContext = new HiveContext(sc)
 
@@ -103,7 +109,7 @@ object ExpediaSpark extends App {
 
     // train.show(5)
 
-//    println("Size of train set: " + train.count())
+    //    println("Size of train set: " + train.count())
 
     // Leakage solution
 
@@ -214,14 +220,10 @@ object ExpediaSpark extends App {
       .map(x => {
         (x.getInt(0), List(x.getInt(1)))
       })
-      //      .map(x => (x.id, [x.hotel_cluster,]))
       .reduceByKey((a, b) => a ++ b)
       .mapValues(x => (x ++ top5_bc.value).take(5))
       .mapValues(x => x.take(5).mkString(" "))
       .map(x => Row(x._1, x._2))
-    //      .mapValues(lambda x: (x + top5_bc.value)[:5])
-    //    .mapValues(lambda x: " ".join([str(i) for i in x]))
-    //    .map(lambda x: Row(id = x[0], hotel_cluster = x[1]))
 
     val submissionSchema = new StructType(Array(
       StructField(ID, IntegerType),
@@ -266,6 +268,7 @@ object ExpediaSpark extends App {
     val nullable = true
     val NOT_NULL = false
 
+    // Without bellow code block - calculation failed with ArgumentException in java.sql.Date.valueOf()
     Source.fromFile(trainFile).getLines.flatMap(line => {
       val arr = line.split(",")
       val index: Int = (if (isTraining) 0 else 1)
@@ -305,7 +308,7 @@ object ExpediaSpark extends App {
     val origDF = loadDataFrame(trainFile, Some(StructType(schemaArrayExtra)))
 
     origDF.printSchema()
-//    origDF.select(avg(col(DATE_TIME))).show(5)
+    //    origDF.select(avg(col(DATE_TIME))).show(5)
 
     origDF
   }
