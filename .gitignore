@@ -1,6 +1,7 @@
 .idea
 target
 *.csv
+.log
 
 spark-logs/*
 metastore_db
