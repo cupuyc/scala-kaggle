@@ -1,4 +1,4 @@
-package io.github.stanreshetnyk
+package io.github.stanreshetnyk.expedia
 
 import org.apache.log4j.{ Level, Logger }
 import org.apache.spark.sql.expressions.{ WindowSpec, Window }
@@ -28,7 +28,7 @@ import org.apache.spark.storage.StorageLevel
  */
 object ExpediaSpark extends App {
 
-  val IS_TEST_RUN = false
+  val IS_TEST_RUN = true
 
   val csvFormat = "com.databricks.spark.csv"
 
@@ -84,7 +84,7 @@ object ExpediaSpark extends App {
       case true =>
         // create smaller data to work with
         if (!File(TRAIN_SMALL_FILE).exists) {
-          val partData = sc.textFile(TRAIN_FILE).take(100000)
+          val partData = sc.textFile(TRAIN_FILE).take(1000)
           saveToFile(TRAIN_SMALL_FILE, partData)
           println("Created small train file")
         } else {
@@ -93,7 +93,7 @@ object ExpediaSpark extends App {
 
         // create smaller data to work with
         if (!File(TEST_SMALL_FILE).exists) {
-          val partData = sc.textFile(TEST_FILE).take(100000)
+          val partData = sc.textFile(TEST_FILE).take(1000)
           saveToFile(TEST_SMALL_FILE, partData)
           println("Created small test file")
         } else {
